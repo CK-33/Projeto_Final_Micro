@@ -155,36 +155,47 @@ void botao_isr(uint gpio, uint32_t eventos) {
 // Mantém um buffer circular de FILTRO_N amostras.
 // Retorna a média das últimas N leituras — atenua ruído do potenciômetro.
 static float adc_ler_filtrado(void) {
-    static uint16_t buffer[FILTRO_N] = {0};  // buffer circular
+    static uint16_t buffer[FILTRO_N] = {0};  // buffer circular, atualmente, o FILTRO_N tem um valor igual a 4, visto os primeiros defines feitos no bloco 1 do código
     static uint8_t  indice = 0;              // posição atual de escrita
     static bool     cheio  = false;          // controle de inicialização
+    // É necessário lembrar que o uso dessas variáveis static ocorre para que consigamos guardar os valores dessas variáveis quando a função se encerrar. 
  
-    // lê o ADC e armazena no buffer
-    adc_select_input(ADC_CANAL);
-    buffer[indice] = adc_read();
-    indice = (indice + 1) % FILTRO_N;
-    if (indice == 0) cheio = true;
+   
+    // Nesse código abaixo (próximas quatro linhas) é onde de fato ocorre a leitura e o armazenamento dos dados no buffer
+    adc_select_input(ADC_CANAL); // Aponta para o canal ADC (GP27)
+    buffer[indice] = adc_read(); // Faz a leitura do ponto onde o joystick está (intervalo de 0 a 4095)
+    indice = (indice + 1) % FILTRO_N; // Esse operador é utilizado para considerar o resto da divisão e assim criar o buffer circular. Quando o indice chega a 4, o resto é 0 e naturalmente reinicia o buffer
+    if (indice == 0) cheio = true; // Se o indice chega a zero, o buffer é considerado cheio. 
  
     // calcula a média — se buffer ainda não encheu, usa só as amostras válidas
     uint32_t soma  = 0;
-    uint8_t  n_val = cheio ? FILTRO_N : indice;
+    uint8_t  n_val = cheio ? FILTRO_N : indice; // 
     for (uint8_t i = 0; i < n_val; i++) soma += buffer[i];
     return (float)soma / (float)n_val;
 }
  
 // --- 6.2 Calcula erro normalizado E[n] ---
 // Centraliza o valor em zero (setpoint = 2048) e normaliza para [-1, +1].
+// Leitor, perceba que nessa função e em outras, estamos declarando algumas variáveis DENTRO dos argumentos das funções, como o caso da variável float leitura
 static float calcular_erro(float leitura) {
     return (leitura - (float)ADC_CENTRO) / (float)ADC_MAX;
 }
+// Se a leitura = 2048, a função retorna erro igual a zero, indicando estabilidade total (nesse caso, o joystick está parado)
  
 // --- 6.3 Controlador PD com saturação unidirecional ---
+
+//É muito importante entender que a visualização desses returns indo de uma função para outra só será de fato vista e compreendida nos loops
+// centrais do core 1
+
+
+
 // Recebe E[n], usa s_error_prev como E[n-1], retorna u[n] em [0, 1].
 static float controlador_pd(float erro) {
-    // termo proporcional
+    // termo proporcional: Aqui nós calculamos o termo proporcional, ou seja, o termo p que influenciará na resposta de controle terá uma resposta proporcional ao erro calculado
     float termo_p = KP * erro;
  
-    // termo derivativo — aproximação por diferenças finitas
+    // termo derivativo — aproximação por diferenças finitas: Se utilizarmos APENAS o termo p, a resposta será mais forte que a necessária, o termo derivativo serve para "frear"  termo p...
+    // Para que a resposta em controle seja mais precisa para o alcance do setpoint. 
     float termo_d = KD * (erro - s_error_prev) / T_CONTROLE;
  
     // salva E[n] como E[n-1] para o próximo ciclo
@@ -192,27 +203,31 @@ static float controlador_pd(float erro) {
  
     // ação de controle
     float u = termo_p + termo_d;
+    // A equação acima é de FATO a fórmula de controle PD, o coração matemático desse código, ela é:
+    // u = KP * erro + KD * (erro - s_error_prev) / T_CONTROLE
  
     // saturação unidirecional: sistema só frea, nunca acelera
     if (u < 0.0f) u = 0.0f;
     if (u > 1.0f) u = 1.0f;
- 
+    // Não há lógica física em ter um controle no joystick quando ele é puxado para baixo (o que demandaria uma aceleração) 
     return u;
 }
  
 // --- 6.4 Aplica u[n] nos dois servos via PWM (comportamento gêmeo) ---
 // Converte u[n] em largura de pulso e atualiza ambos os servos.
+// Aqui ocorre a atuação do código
 static void servo_set(float u) {
-    uint16_t largura = (uint16_t)(SERVO_MIN_US + u * (SERVO_MAX_US - SERVO_MIN_US));
- 
-    uint slice1 = pwm_gpio_to_slice_num(PIN_SERVO);
+    uint16_t largura = (uint16_t)(SERVO_MIN_US + u * (SERVO_MAX_US - SERVO_MIN_US)); // Calcula a largura em PWM baseado no valor da resposta de controle u[n]
+    // Encontra o slice dos dois pinos, essa aplicação é mais devida a elegância do que a utilidade, já que poderíamos simplesmente apontar o slice que definimos
+    // A utilidade é que se um dia quisermos alterar algum dos slices e/ou canais, o faremos apenas na parte dos defines.
+    uint slice1 = pwm_gpio_to_slice_num(PIN_SERVO); 
     uint slice2 = pwm_gpio_to_slice_num(PIN_SERVO2);
     pwm_set_chan_level(slice1, pwm_gpio_to_channel(PIN_SERVO),  largura);
     pwm_set_chan_level(slice2, pwm_gpio_to_channel(PIN_SERVO2), largura);
 }
 
 // ------------------------------------------------------------
-//  BLOCO 4 DO CÓDIGO
+//  BLOCO 4 DO CÓDIGO: Nesse bloco, podemos ver todas as funções auxiliares que farão a espinha dorsal do funcionamento do core 0, para gerenciar as saídas da matriz de leds, dos leds e do buzzer.
 // ------------------------------------------------------------
 
 
@@ -330,4 +345,157 @@ static void atualizar_sinalizacao(PIO pio, uint sm, float erro_norm, float contr
     }
  
     set_matriz(pio, sm, erro_abs, controle);
+}
+
+ 
+// ------------------------------------------------------------
+//  8. LOOP DO CORE 1 — malha de controle (20 ms)
+// ------------------------------------------------------------
+// Lançado pelo main() via multicore_launch_core1().
+// Roda para sempre — nunca retorna.
+void loop_core1(void) {
+    absolute_time_t proximo = get_absolute_time();
+ 
+    while (true) {
+        if (g_armed) {
+            // --- passo 1: lê e filtra o ADC ---
+            float leitura = adc_ler_filtrado();
+ 
+            // --- passo 2: calcula erro normalizado E[n] ---
+            float erro = calcular_erro(leitura);
+ 
+            // --- passo 3: controlador PD → u[n] saturado ---
+            float controle = controlador_pd(erro);
+ 
+            // --- passo 4: atualiza variáveis compartilhadas com Core 0 ---
+            g_error_norm  = erro;
+            g_control_out = controle;
+ 
+            // --- passo 5: aciona os dois servos ---
+            servo_set(controle);
+ 
+        } else {
+            // desarmado: garante servo fechado e variáveis zeradas
+            // (redundante com a ISR, mas seguro para o caso de boot)
+            servo_set(0.0f);
+            g_error_norm  = 0.0f;
+            g_control_out = 0.0f;
+        }
+ 
+        // --- passo 6: aguarda até o próximo ciclo de 20 ms (drift-free) ---
+        proximo = delayed_by_ms(proximo, PERIODO_CORE1_MS);
+        sleep_until(proximo);
+    }
+}
+ 
+// ------------------------------------------------------------
+//  9. LOOP DO CORE 0 — display e sinalização (50 ms)
+// ------------------------------------------------------------
+// Roda no main() após lançar o Core 1.
+// Lê as variáveis voláteis e atualiza LED RGB, matriz e buzzer.
+// Recebe pio e sm para repassar às funções da matriz WS2812B.
+void loop_core0(PIO pio, uint sm) {
+    absolute_time_t proximo = get_absolute_time();
+ 
+    while (true) {
+        // --- passo 1: lê variáveis compartilhadas ---
+        float erro    = g_error_norm;
+        float controle = g_control_out;
+        bool  armado  = g_armed;
+ 
+        if (armado) {
+            // --- passo 2: atualiza sinalização conforme |e[n]| ---
+            atualizar_sinalizacao(pio, sm, erro, controle);
+        } else {
+            // desarmado: LED vermelho, matriz apagada, buzzer silente
+            set_rgb(true, false, false);
+            set_buzzer(0);
+            set_matriz(pio, sm, 0.0f, 0.0f);
+        }
+ 
+        // --- passo 3: aguarda até o próximo ciclo de 50 ms (drift-free) ---
+        proximo = delayed_by_ms(proximo, PERIODO_CORE0_MS);
+        sleep_until(proximo);
+    }
+}
+ 
+// ------------------------------------------------------------
+//  10. MAIN — inicialização e lançamento dos cores
+// ------------------------------------------------------------
+int main(void) {
+    // --- 10.1 SDK base ---
+    stdio_init_all();   // habilita printf via USB (debug)
+ 
+    // --- 10.2 ADC — joystick ---
+    adc_init();
+    adc_gpio_init(PIN_JOYSTICK);    // configura GP27 como entrada analógica
+ 
+    // --- 10.3 PWM — servo 1 (GP28) ---
+    gpio_set_function(PIN_SERVO, GPIO_FUNC_PWM);
+    {
+        uint slice = pwm_gpio_to_slice_num(PIN_SERVO);
+        pwm_set_clkdiv(slice, SERVO_CLK_DIV);      // 125 MHz / 125 = 1 MHz
+        pwm_set_wrap(slice, SERVO_WRAP);            // 20.000 contagens = 20 ms
+        pwm_set_chan_level(slice, pwm_gpio_to_channel(PIN_SERVO), SERVO_MIN_US);
+        pwm_set_enabled(slice, true);
+    }
+ 
+    // --- 10.4 PWM — servo 2 (GP9) ---
+    gpio_set_function(PIN_SERVO2, GPIO_FUNC_PWM);
+    {
+        uint slice = pwm_gpio_to_slice_num(PIN_SERVO2);
+        pwm_set_clkdiv(slice, SERVO_CLK_DIV);
+        pwm_set_wrap(slice, SERVO_WRAP);
+        pwm_set_chan_level(slice, pwm_gpio_to_channel(PIN_SERVO2), SERVO_MIN_US);
+        pwm_set_enabled(slice, true);
+    }
+ 
+    // --- 10.5 PWM — buzzer (GP21) ---
+    gpio_set_function(PIN_BUZZER, GPIO_FUNC_PWM);
+    {
+        uint slice = pwm_gpio_to_slice_num(PIN_BUZZER);
+        pwm_set_clkdiv(slice, SERVO_CLK_DIV);      // 1 MHz para cálculo de frequência
+        pwm_set_wrap(slice, 1999);                  // frequência inicial: 500 Hz
+        pwm_set_chan_level(slice, pwm_gpio_to_channel(PIN_BUZZER), 0); // silente
+        pwm_set_enabled(slice, true);
+    }
+ 
+    // --- 10.6 GPIO — LED RGB (cátodo comum) ---
+    gpio_init(PIN_LED_R); gpio_set_dir(PIN_LED_R, GPIO_OUT); gpio_put(PIN_LED_R, false);
+    gpio_init(PIN_LED_G); gpio_set_dir(PIN_LED_G, GPIO_OUT); gpio_put(PIN_LED_G, false);
+    gpio_init(PIN_LED_B); gpio_set_dir(PIN_LED_B, GPIO_OUT); gpio_put(PIN_LED_B, false);
+ 
+    // --- 10.7 GPIO — botão de arme (GP5, pull-up interno) ---
+    gpio_init(PIN_BOTAO);
+    gpio_set_dir(PIN_BOTAO, GPIO_IN);
+    gpio_pull_up(PIN_BOTAO);
+    gpio_set_irq_enabled_with_callback(
+        PIN_BOTAO,
+        GPIO_IRQ_EDGE_FALL,     // dispara na borda de descida (pressionado)
+        true,
+        &botao_isr
+    );
+ 
+    // --- 10.8 PIO — matriz WS2812B (GP7) ---
+    PIO  pio = pio0;
+    uint sm  = 0;
+    uint offset = pio_add_program(pio, &ws2812_program);
+    ws2812_program_init(pio, sm, offset, PIN_MATRIZ, WS2812_FREQ, false); // false = RGB (não RGBW)
+ 
+    // apaga todos os LEDs da matriz na inicialização
+    for (int i = 0; i < MATRIZ_LEDS; i++) {
+        matriz_put_pixel(pio, sm, 0, 0, 0);
+    }
+    sleep_ms(10); // aguarda o protocolo WS2812B processar o reset
+ 
+    // --- 10.9 Lança o Core 1 ---
+    // multicore_launch_core1 inicia a função no segundo core
+    // a partir daqui, os dois cores rodam em paralelo
+    multicore_launch_core1(loop_core1);
+ 
+    // --- 10.10 Core 0 entra no loop de display ---
+    // esta chamada nunca retorna
+    loop_core0(pio, sm);
+ 
+    return 0; // nunca alcançado
 }
