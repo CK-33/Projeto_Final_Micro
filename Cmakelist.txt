@@ -1,0 +1,35 @@
+cmake_minimum_required(VERSION 3.13)
+
+# Importa o SDK do Pico antes do project()
+include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+
+project(acs C CXX ASM)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+
+pico_sdk_init()
+
+# Gera o header ws2812.pio.h a partir do arquivo PIO
+pico_generate_pio_header(acs ${CMAKE_CURRENT_LIST_DIR}/ws2812.pio)
+
+# Executável principal
+add_executable(acs acs.c)
+
+# Bibliotecas necessárias
+target_link_libraries(acs
+    pico_stdlib           # base do SDK (gpio, sleep, etc.)
+    pico_multicore        # dual-core (multicore_launch_core1)
+    hardware_adc          # ADC (joystick)
+    hardware_pwm          # PWM (servo e buzzer)
+    hardware_pio          # PIO (matriz WS2812B)
+    hardware_gpio         # GPIO (botão e LED RGB)
+    hardware_clocks       # clocks (usado pelo PIO)
+    hardware_irq          # interrupções GPIO
+)
+
+# Gera os arquivos .uf2 e .bin para flash
+pico_add_extra_outputs(acs)
+
+# Habilita saída serial via USB (para debug com printf)
+pico_enable_stdio_usb(acs 1)
+pico_enable_stdio_uart(acs 0)
